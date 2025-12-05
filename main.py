@@ -9,6 +9,8 @@ import uuid
 import uvicorn
 import glob
 import shutil
+import sys
+import time
 
 app = FastAPI()
 app.add_middleware(
@@ -26,15 +28,17 @@ app.mount("/files", StaticFiles(directory=DOWNLOAD_DIR), name="files")
 
 @app.get("/")
 def root():
-    return {"status": "ok"}
+    return {"status": "ok", "message": "Kaneki Downloader (Playback Fixed)"}
 
 
-def cleanup_keep_only(target_ext, base_name):
-    """
-    Remove any files with base_name that do not end with target_ext.
-    """
+def find_generated_file(base_name):
+    matches = glob.glob(os.path.join(DOWNLOAD_DIR, base_name + ".*"))
+    return matches
+
+
+def cleanup_except(base_name, keep_exts):
     for path in glob.glob(os.path.join(DOWNLOAD_DIR, base_name + ".*")):
-        if not path.lower().endswith(target_ext.lower()):
+        if not any(path.lower().endswith(ext) for ext in keep_exts):
             try:
                 os.remove(path)
             except Exception:
@@ -44,28 +48,33 @@ def cleanup_keep_only(target_ext, base_name):
 @app.get("/download")
 def download(
     url: str = Query(..., description="Video URL"),
-    format_type: str = Query("mp4", regex="^(mp4|mp3)$", description="mp4 or mp3"),
-    # quality param is accepted but ignored for mp4 — mp4 will always download highest available quality
-    quality: int = Query(None, description="(ignored for mp4) optional hint only")
+    format_type: str = Query("mp4", regex="^(mp4|mp3)$", description="mp4 or mp3")
 ):
+    """
+    - format_type=mp3 -> download best audio and convert to mp3 (single .mp3 output)
+    - format_type=mp4 -> always download highest available video quality (bestvideo+bestaudio) and output .mp4
+    """
     if not url:
         raise HTTPException(status_code=400, detail="URL required")
 
     base_name = str(uuid.uuid4())
     outtmpl = os.path.join(DOWNLOAD_DIR, base_name + ".%(ext)s")
 
-    # ensure yt-dlp uses android player for bypassing 403 sometimes
-    common_extractor_args = {"youtube": {"player_client": ["android"]}}
+    common = {
+        "outtmpl": outtmpl,
+        "quiet": False,               # show console logs to diagnose if needed
+        "no_warnings": True,
+        "nocheckcertificate": True,
+        "extractor_args": {"youtube": {"player_client": ["android"]}},
+        "prefer_ffmpeg": True,
+    }
 
     try:
         if format_type == "mp3":
-            # audio-only: download best audio, convert to mp3, then delete intermediates
+            # audio-only workflow -> produce single .mp3
             opts = {
+                **common,
                 "format": "bestaudio/best",
-                "outtmpl": outtmpl,
-                "quiet": True,
-                "nocheckcertificate": True,
-                "extractor_args": common_extractor_args,
                 "postprocessors": [
                     {
                         "key": "FFmpegExtractAudio",
@@ -73,67 +82,57 @@ def download(
                         "preferredquality": "192",
                     }
                 ],
-                # ensure ffmpeg used when possible
-                "prefer_ffmpeg": True,
-                # keep temporary files so we can explicitly cleanup afterwards
+                # ensure ffmpeg invoked
                 "keepvideo": False,
             }
 
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
 
-            # After conversion, find the mp3 file
-            mp3_matches = glob.glob(os.path.join(DOWNLOAD_DIR, base_name + ".mp3"))
-            if not mp3_matches:
-                # sometimes yt-dlp outputs .m4a then postprocessor failed — report useful debug
-                other_matches = glob.glob(os.path.join(DOWNLOAD_DIR, base_name + ".*"))
-                raise HTTPException(status_code=500, detail=f"mp3 not produced. files: {other_matches}")
+            # try to find mp3
+            matches = find_generated_file(base_name)
+            mp3 = next((m for m in matches if m.lower().endswith(".mp3")), None)
+            if not mp3:
+                # sometimes yt-dlp might output .m4a then postprocessor failed; list files for debug
+                raise HTTPException(status_code=500, detail=f"mp3 not produced; generated: {matches}")
 
-            # remove any other leftover files (e.g., .m4a, .webm)
-            cleanup_keep_only(".mp3", base_name)
-            filename = os.path.basename(mp3_matches[0])
+            # remove any other leftover files, keep only mp3
+            cleanup_except(base_name, [".mp3"])
+            filename = os.path.basename(mp3)
             return {"download_url": f"/files/{filename}", "filename": filename}
 
         else:
-            # mp4: choose highest available quality (ignore quality param)
-            # use "bestvideo+bestaudio/best" which picks highest video and merges with best audio
+            # mp4 workflow: always pick highest available video quality
+            # 'bestvideo+bestaudio/best' asks yt-dlp to choose best video and merge
             opts = {
+                **common,
                 "format": "bestvideo+bestaudio/best",
-                "outtmpl": outtmpl,
                 "merge_output_format": "mp4",
-                "quiet": True,
-                "nocheckcertificate": True,
-                "extractor_args": common_extractor_args,
                 "postprocessor_args": ["-movflags", "+faststart"],
-                "prefer_ffmpeg": True,
             }
 
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
 
-            # find mp4 (or fallback to any created file)
-            matches = glob.glob(os.path.join(DOWNLOAD_DIR, base_name + ".*"))
+            # find mp4
+            matches = find_generated_file(base_name)
             if not matches:
-                raise HTTPException(status_code=500, detail="Downloaded file not found after yt_dlp run")
+                raise HTTPException(status_code=500, detail="No file generated after download")
 
             # prefer mp4
-            chosen = None
-            for m in matches:
-                if m.lower().endswith(".mp4"):
-                    chosen = m
-                    break
-            if not chosen:
-                chosen = matches[0]
-
+            chosen = next((m for m in matches if m.lower().endswith(".mp4")), matches[0])
+            # cleanup others, keep mp4
+            cleanup_except(base_name, [os.path.splitext(chosen)[1]])
             filename = os.path.basename(chosen)
-            # remove any other files to keep storage clean (keep mp4)
-            cleanup_keep_only(".mp4", base_name)
             return {"download_url": f"/files/{filename}", "filename": filename}
 
     except yt_dlp.utils.DownloadError as de:
-        # provide clearer debug
+        # yt-dlp-specific download problems
+        print("yt-dlp DownloadError:", de, file=sys.stderr)
         raise HTTPException(status_code=500, detail=f"yt-dlp download error: {str(de)}")
     except Exception as e:
+        # general exception; include repr for debugging
+        print("Download exception:", repr(e), file=sys.stderr)
         raise HTTPException(status_code=500, detail=str(e))
 
 
