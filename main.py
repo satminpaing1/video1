@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse
 
 app = FastAPI()
 
-# CORS
+# CORS Setup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,15 +22,12 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 app.mount("/files", StaticFiles(directory=DOWNLOAD_DIR), name="files")
 
-# Special format for pure Audio
-SPECIAL_AUDIO_FORMAT = "bestaudio[ext=m4a]/bestaudio"
-
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "Kaneki Downloader V2.2 (High Quality Enabled)"}
+    return {"status": "ok", "message": "Kaneki Downloader (Selector Enabled)"}
 
 # ------------------------------------------------------------
-# 1. GET FORMATS (SMART ANALYSIS)
+# 1. VIDEO FORMATS CHECKER (SMART SELECTOR)
 # ------------------------------------------------------------
 @app.get("/formats")
 def get_formats(url: str):
@@ -48,7 +45,7 @@ def get_formats(url: str):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
         
-        # ရှိသမျှ Formats တွေကို စစ်မယ်
+        # ဗီဒီယိုမှာ တကယ်ရှိတဲ့ Resolution တွေကို ရှာမယ်
         raw_formats = info.get('formats', [])
         available_heights = set()
 
@@ -57,39 +54,44 @@ def get_formats(url: str):
             if f.get('vcodec') != 'none' and f.get('height'):
                 available_heights.add(f['height'])
 
-        # Frontend ကို ပြန်ပို့ပေးမယ့် စာရင်း (UI မပျက်အောင် ဖန်တီးခြင်း)
         final_formats = []
         
-        # Quality အလိုက် Format ID တွေကို Construct လုပ်မယ် (Merge လုပ်ဖို့အတွက်)
-        # 1080p, 720p, 480p, 360p စသည်ဖြင့် စစ်မယ်
-        target_resolutions = [1080, 720, 480, 360]
+        # User လိုချင်တဲ့ Resolution တွေကို အစဉ်လိုက် စစ်မယ် (1080p ကနေ အငယ်ဆုံးထိ)
+        # 2160(4K), 1440(2K), 1080, 720, 480, 360
+        target_resolutions = [2160, 1440, 1080, 720, 480, 360]
         
         for res in target_resolutions:
-            if res in available_heights or (res == 360): # 360 ကတော့ အမြဲထည့်ထားမယ်
-                # Frontend ရဲ့ JS logic က (f.ext === 'mp4' && f.vcodec !== 'none') ကို စစ်ထားလို့
-                # Backend ကနေ Fake Data လေး ထည့်ပေးလိုက်မယ်၊ ဒါပေမယ့် format_id က အစစ်
+            if res in available_heights:
+                # တွေ့ရင် Frontend ကို ပို့မယ်
+                # format_id မှာ 'height={res}' လို့ သုံးထားတာကြောင့် အတိအကျပဲ ဒေါင်းပါလိမ့်မယ်
                 final_formats.append({
-                    "format_id": f"bestvideo[height<={res}][ext=mp4]+bestaudio[ext=m4a]/best[height<={res}]",
-                    "ext": "mp4",       # Frontend check အတွက်
-                    "vcodec": "h264",   # Frontend check အတွက်
+                    # Backend က နားလည်မယ့် Code (အတိအကျယူရန်)
+                    "format_id": f"bestvideo[height={res}]+bestaudio/best[height={res}]",
+                    
+                    # Frontend UI က နားလည်ဖို့အတွက် Fake Data (UI မပျက်အောင်)
+                    "ext": "mp4",       
+                    "vcodec": "h264",
                     "height": res,
                     "label": f"{res}p"
                 })
 
+        # အကယ်၍ ဘာမှမတွေ့ခဲ့ရင် (ဥပမာ - Audio only or strange format)
+        if not final_formats:
+             final_formats.append({
+                "format_id": "best[ext=mp4]",
+                "ext": "mp4",
+                "vcodec": "h264",
+                "height": 360
+            })
+
         return {"formats": final_formats}
 
     except Exception as e:
-        print(f"Error: {e}")
-        # Error ဖြစ်ရင် အနည်းဆုံး Auto တစ်ခုပြန်ပေးမယ်
-        return {"formats": [{
-            "format_id": "best[ext=mp4]", 
-            "ext": "mp4", 
-            "vcodec": "h264", 
-            "height": 720
-        }]}
+        print(f"Error analyzing: {e}")
+        return {"formats": []}
 
 # ------------------------------------------------------------
-# 2. DOWNLOAD HANDLER (AUTO MERGE)
+# 2. DOWNLOAD HANDLER
 # ------------------------------------------------------------
 @app.get("/download")
 def download(url: str, format_id: str):
@@ -97,38 +99,34 @@ def download(url: str, format_id: str):
         raise HTTPException(status_code=400, detail="Missing parameters")
 
     try:
-        # File name setting
+        # Audio Only (MP3/M4A) Frontend ကပို့တဲ့ကုဒ်
+        if "bestaudio" in format_id and "bestvideo" not in format_id:
+             # Audio သီးသန့်
+             pass 
+        
+        # Video ဆိုရင် MP4 ပြောင်းပေးဖို့ Setting ချမယ်
         uid = str(uuid.uuid4())[:8]
         out_tmpl = os.path.join(DOWNLOAD_DIR, f"kaneki_{uid}.%(ext)s")
 
         ydl_opts = {
+            "format": format_id, # Frontend ကရွေးလိုက်တဲ့ အတိအကျ format (e.g. height=1080)
             "outtmpl": out_tmpl,
             "quiet": True,
             "noplaylist": True,
             "nocheckcertificate": True,
-            # FFmpeg location (Nixpacks မှာထည့်ထားပြီးသားမို့လို့ Path မလိုပါ)
-            "merge_output_format": "mp4", # Video ဆိုရင် အမြဲတမ်း MP4 ပြောင်းမယ်
+            "merge_output_format": "mp4", # အသံနဲ့ရုပ် ပေါင်းပြီး MP4 ထုတ်ပေးမယ်
         }
-
-        # Audio Only Request
-        if "bestaudio" in format_id and "bestvideo" not in format_id:
-            ydl_opts["format"] = format_id
-        else:
-            # Video Request (1080p, 720p etc.)
-            ydl_opts["format"] = format_id
-            # 1080p ဆိုရင် Audio သက်သက် Video သက်သက်လာမှာမို့လို့ ပေါင်းပေးရမယ်
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
             
-            # yt-dlp က တစ်ခါတစ်လေ .mkv နဲ့ သိမ်းတတ်လို့ .mp4 ဖြစ်အောင် rename စစ်မယ်
-            if "merge_output_format" in ydl_opts and filename.endswith(".mkv"):
+            # .mkv နဲ့ထွက်လာရင် .mp4 လို့ နာမည်ပြန်ချိန်းပေးမယ် (User အဆင်ပြေအောင်)
+            if filename.endswith(".mkv"):
                  pre, _ = os.path.splitext(filename)
                  if os.path.exists(pre + ".mp4"):
                      filename = pre + ".mp4"
 
-        # Path အပြည့်အစုံမဟုတ်ဘဲ Filename ပဲ ပြန်ပို့မယ်
         clean_filename = os.path.basename(filename)
 
         return {
@@ -137,5 +135,5 @@ def download(url: str, format_id: str):
         }
 
     except Exception as e:
-        print(f"Download Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"DL Error: {e}")
+        raise HTTPException(status_code=500, detail="Download Failed")
