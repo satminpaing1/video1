@@ -1,5 +1,5 @@
 fastapi
 uvicorn
-yt-dlp
 python-multipart
 ffmpeg-python
+yt-dlp>=2024.10.22
