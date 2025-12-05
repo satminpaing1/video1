@@ -7,6 +7,12 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 app = FastAPI()
+# main.py ထဲမှာ ထည့်ရန်
+import shutil
+
+# FFmpeg ရှိမရှိ စစ်ဆေးခြင်း
+if not shutil.which("ffmpeg"):
+    print("CRITICAL ERROR: FFmpeg not found in path!")
 
 # CORS Setup
 app.add_middleware(
