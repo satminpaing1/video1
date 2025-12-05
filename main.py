@@ -20,7 +20,7 @@ app.add_middleware(
 )
 
 DOWNLOAD_DIR = "downloads"
-# Startup: Clean old downloads to free up space
+# Startup: Clean old downloads
 if os.path.exists(DOWNLOAD_DIR):
     shutil.rmtree(DOWNLOAD_DIR, ignore_errors=True)
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -37,14 +37,14 @@ print("-----------------------")
 
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "Kaneki V3.1 (Force MP3 Fix)"}
+    return {"status": "ok", "message": "Kaneki V3.2 (Web Client + Force FFmpeg)"}
 
 @app.get("/formats")
 def get_formats(url: str = Query(..., description="Video URL")):
     if not url:
         raise HTTPException(status_code=400, detail="URL required")
 
-    # Use 'web' client to avoid PO Token errors on Server IPs
+    # Use 'web' client to avoid PO Token errors shown in your logs
     opts = {
         "quiet": True,
         "skip_download": True,
@@ -66,7 +66,6 @@ def get_formats(url: str = Query(..., description="Video URL")):
             
             # Filter Video Formats
             if vcodec and vcodec != "none" and height:
-                # Deduplicate by height
                 if height not in seen_qualities and ext in ['mp4', 'webm']:
                     seen_qualities.add(height)
                     label = f"{height}p"
@@ -78,10 +77,7 @@ def get_formats(url: str = Query(..., description="Video URL")):
                         "type": "video"
                     })
 
-        # Sort: High to Low
         formats.sort(key=lambda x: (x["height"] or 0), reverse=True)
-        
-        # Add Audio Option manually
         formats.insert(0, {
             "format_id": "bestaudio", 
             "label": "🎵 MP3 Music (Best Quality)", 
@@ -110,7 +106,7 @@ def download(
         "quiet": True,
         "nocheckcertificate": True,
         "outtmpl": os.path.join(DOWNLOAD_DIR, f"{base_name}.%(ext)s"),
-        # 'web' client is safer for servers without PO Token
+        # Switching to 'web' client to stop the crashes
         "extractor_args": {"youtube": {"player_client": ["web"]}},
         "prefer_ffmpeg": True,
         "retries": 5,
@@ -119,7 +115,6 @@ def download(
     try:
         if format_type == "mp3":
             # --- MP3 MODE ---
-            # We try to convert during download, but if it fails, we do it manually later
             ydl_opts.update({
                 "format": "bestaudio/best",
                 "postprocessors": [{
@@ -143,58 +138,46 @@ def download(
 
         # START DOWNLOAD
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            try:
-                ydl.download([url])
-            except Exception as e:
-                print(f"DL Error: {e}, retrying with fallback...")
-                # Fallback to 'best' if specific format fails due to signature/token
-                ydl_opts['format'] = 'best'
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl_fallback:
-                    ydl_fallback.download([url])
+            ydl.download([url])
 
-        # --- MANUAL CONVERSION / RENAMING LOGIC ---
-        
-        # Find the downloaded file (it could be .webm, .mkv, .mp4, etc.)
+        # --- MANUAL PROCESSING ---
         files = glob.glob(os.path.join(DOWNLOAD_DIR, f"{base_name}.*"))
         if not files:
             raise Exception("File failed to create.")
         
-        final_file = files[0] # The file that exists currently
+        final_file = files[0]
         final_filename = os.path.basename(final_file)
 
         # 1. FORCE MP3 CONVERSION
-        # If user wants MP3, but file is NOT .mp3 (e.g. it is .webm or .m4a)
         if format_type == "mp3":
             if not final_file.endswith(".mp3"):
-                print(f"⚠️ Auto-conversion failed. Manually converting {final_file} to MP3...")
+                print(f"⚠️ Manually converting {final_file} to MP3...")
                 new_mp3_path = os.path.join(DOWNLOAD_DIR, f"{base_name}.mp3")
                 
-                # Run FFmpeg command manually
-                # -vn = No Video, -ab 192k = Audio Bitrate
-                cmd = ["ffmpeg", "-i", final_file, "-vn", "-ab", "192k", "-f", "mp3", new_mp3_path, "-y"]
-                subprocess.run(cmd, check=True)
-                
-                # If successful, remove old file and update variable
-                if os.path.exists(new_mp3_path):
-                    os.remove(final_file)
-                    final_file = new_mp3_path
-                    final_filename = f"{base_name}.mp3"
+                # Check for FFmpeg again before running
+                if shutil.which("ffmpeg"):
+                    cmd = ["ffmpeg", "-i", final_file, "-vn", "-ab", "192k", "-f", "mp3", new_mp3_path, "-y"]
+                    subprocess.run(cmd, check=True)
+                    
+                    if os.path.exists(new_mp3_path):
+                        os.remove(final_file)
+                        final_file = new_mp3_path
+                        final_filename = f"{base_name}.mp3"
+                else:
+                    print("❌ Conversion skipped because FFmpeg is missing!")
         
         # 2. FORCE MP4 CONTAINER
-        # If user wants Video, but file is .webm or .mkv, change container to mp4
         elif format_type == "mp4":
             if not final_file.endswith(".mp4"):
-                 print(f"⚠️ Container is {final_filename}, remuxing to MP4...")
+                 print(f"⚠️ Remuxing to MP4...")
                  new_mp4_path = os.path.join(DOWNLOAD_DIR, f"{base_name}.mp4")
-                 
-                 # Remux without re-encoding (very fast)
-                 cmd = ["ffmpeg", "-i", final_file, "-c", "copy", new_mp4_path, "-y"]
-                 subprocess.run(cmd, check=True)
-                 
-                 if os.path.exists(new_mp4_path):
-                    os.remove(final_file)
-                    final_file = new_mp4_path
-                    final_filename = f"{base_name}.mp4"
+                 if shutil.which("ffmpeg"):
+                     cmd = ["ffmpeg", "-i", final_file, "-c", "copy", new_mp4_path, "-y"]
+                     subprocess.run(cmd, check=True)
+                     if os.path.exists(new_mp4_path):
+                        os.remove(final_file)
+                        final_file = new_mp4_path
+                        final_filename = f"{base_name}.mp4"
 
         return {"download_url": f"/files/{final_filename}", "filename": final_filename}
 
