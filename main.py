@@ -31,7 +31,7 @@ SPECIAL_AUDIO_FORMAT = "bestaudio[ext=m4a]/bestaudio"
 
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "Kaneki Downloader (Turbo Mode)"}
+    return {"status": "ok", "message": "Kaneki Downloader (Lite Version)"}
 
 # ------------------------------------------------------------
 # 1. SMART FORMATS
@@ -88,7 +88,7 @@ def get_formats(url: str):
 
 
 # ------------------------------------------------------------
-# 2. DOWNLOAD HANDLER (TURBO SPEED)
+# 2. DOWNLOAD HANDLER (OPTIMIZED FOR SIZE)
 # ------------------------------------------------------------
 @app.get("/download")
 def download(url: str, format_id: str):
@@ -99,40 +99,33 @@ def download(url: str, format_id: str):
         uid = str(uuid.uuid4())[:8]
         out_tmpl = os.path.join(DOWNLOAD_DIR, f"kaneki_{uid}.%(ext)s")
         
-        # --- SPEED OPTIMIZATION SETTINGS ---
         ydl_opts = {
             "outtmpl": out_tmpl,
             "quiet": True,
             "noplaylist": True,
             "nocheckcertificate": True,
-            
-            # --- ဒီအပိုင်းက အမြန်နှုန်းကို တင်ပေးမယ့်အရာများ ---
-            "concurrent_fragment_downloads": 5,  # တစ်ပြိုင်နက် ၅ ပိုင်းခွဲဆွဲမယ်
-            "http_chunk_size": 10485760,         # Chunk size 10MB ထားမယ်
-            "retries": 10,                       # လိုင်းကျရင် ၁၀ ခါပြန်စမ်းမယ်
-            "fragment_retries": 10,
-            "buffersize": 1024,
-            # ----------------------------------------------
+            # Speed Fix: ရှုပ်ထွေးတဲ့ concurrent တွေဖြုတ်လိုက်ပါပြီ
+            # ဒါက Server အသေးတွေမှာ ပိုငြိမ်ပြီး ပိုမြန်ပါတယ်
         }
 
         # --- VIDEO REQUEST ---
         if format_id.startswith("v-"):
             height = format_id.split("-")[1]
-            ydl_opts["format"] = f"bestvideo[height={height}]+bestaudio/best[height={height}]"
+            # Video အတွက် Audio ကိုအရမ်းကြီးတာမယူဘဲ 128k အောက်ကိုပဲယူမယ် (မြန်အောင်လို့)
+            ydl_opts["format"] = f"bestvideo[height={height}]+bestaudio[abr<=128]/best[height={height}]"
             ydl_opts["merge_output_format"] = "mp4"
 
-        # --- AUDIO REQUEST ---
+        # --- AUDIO REQUEST (SUPER COMPRESSED) ---
         elif format_id == SPECIAL_AUDIO_FORMAT or "bestaudio" in format_id:
-            ydl_opts["format"] = "bestaudio/best"
+            # Source file ကိုကတည်းက အသေးဆုံးဖြစ်နိုင်တာကို အရင်ရှာဆွဲမယ်
+            ydl_opts["format"] = "bestaudio[abr<=128]/bestaudio"
+            
+            # ပြီးမှ MP3 96kbps (Size အတော်သေး) သို့ ပြောင်းမယ်
             ydl_opts["postprocessors"] = [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
-                'preferredquality': '128', 
+                'preferredquality': '96', # 128 ကနေ 96 ပြောင်းလိုက်သည် (Size ပိုသေးရန်)
             }]
-            # Audio Convert လုပ်တာမြန်အောင် Quality နည်းနည်းလျှော့ပြီး Speed တင်မယ်
-            ydl_opts["postprocessor_args"] = [
-                '-speed', '0' # Fastest encoding speed
-            ]
         
         else:
             ydl_opts["format"] = "best[ext=mp4]"
@@ -143,12 +136,13 @@ def download(url: str, format_id: str):
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
             
-            # Extension Fix
+            # Video Extension Fix
             if format_id.startswith("v-") and filename.endswith(".mkv"):
                  pre, _ = os.path.splitext(filename)
                  if os.path.exists(pre + ".mp4"):
                      filename = pre + ".mp4"
             
+            # Audio Extension Fix
             if "bestaudio" in format_id or format_id == SPECIAL_AUDIO_FORMAT:
                 pre, _ = os.path.splitext(filename)
                 if os.path.exists(pre + ".mp3"):
