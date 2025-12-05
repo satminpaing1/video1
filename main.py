@@ -25,21 +25,21 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 app.mount("/files", StaticFiles(directory=DOWNLOAD_DIR), name="files")
 
-# --- SYSTEM DIAGNOSTIC ---
-print("--- BOOT CHECK ---")
+# --- FFmpeg စစ်ဆေးခြင်း ---
+print("--- SYSTEM CHECK ---")
 if shutil.which("ffmpeg"):
-    print("✅ SYSTEM: FFmpeg is installed! MP3 conversion will work.")
+    print("✅ FFmpeg found! MP3 conversion will work.")
 else:
-    print("❌ SYSTEM: FFmpeg is MISSING! Check Dockerfile.")
+    print("❌ WARNING: FFmpeg not found.")
 print("--------------------")
 
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "Kaneki V4.0 (Docker + FFmpeg)"}
+    return {"status": "ok", "message": "Kaneki V5 (Nixpacks + Web Client)"}
 
 @app.get("/formats")
 def get_formats(url: str = Query(..., description="Video URL")):
-    # Use 'web' client to stop the PO Token crashes
+    # 'web' client သည် Server IP များတွင် PO Token error မတက်စေရန် အကောင်းဆုံးဖြစ်သည်
     opts = {
         "quiet": True,
         "skip_download": True,
@@ -55,6 +55,7 @@ def get_formats(url: str = Query(..., description="Video URL")):
             if f.get("vcodec") != "none" and f.get("height"):
                 h = f["height"]
                 ext = f["ext"]
+                # MP4 နှင့် WebM ကိုသာ ယူမည်
                 if h not in seen and ext in ['mp4', 'webm']:
                     seen.add(h)
                     formats.append({
@@ -69,17 +70,18 @@ def get_formats(url: str = Query(..., description="Video URL")):
         return {"formats": formats}
     except Exception as e:
         print(f"Format Error: {e}")
-        raise HTTPException(status_code=500, detail="Could not analyze video.")
+        # Error တက်လျှင် Client ကို ဘာမှမပြဘဲ Crash သွားမည့်အစား Message ပြန်ပို့မည်
+        raise HTTPException(status_code=500, detail="Could not analyze video. Link might be restricted.")
 
 @app.get("/download")
 def download(url: str, format_type: str = "mp4", format_id: str = None):
     base_name = str(uuid.uuid4())
     
-    # Configuration
     ydl_opts = {
         "quiet": True,
         "outtmpl": os.path.join(DOWNLOAD_DIR, f"{base_name}.%(ext)s"),
-        "extractor_args": {"youtube": {"player_client": ["web"]}}, # Fixes the crash
+        # Web client ကိုသုံးမှ 403 Forbidden Error ပျောက်မည်
+        "extractor_args": {"youtube": {"player_client": ["web"]}},
         "prefer_ffmpeg": True,
     }
 
@@ -101,20 +103,19 @@ def download(url: str, format_type: str = "mp4", format_id: str = None):
                  ydl_opts["format"] = "bestvideo+bestaudio/best"
             ydl_opts["merge_output_format"] = "mp4"
 
-        # Download
+        # Download Start
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
-        # Verify File
+        # File Verification
         files = glob.glob(os.path.join(DOWNLOAD_DIR, f"{base_name}.*"))
         if not files: raise Exception("Download failed.")
         
         final_file = files[0]
         final_filename = os.path.basename(final_file)
 
-        # Force MP3 Check
+        # Force MP3 Conversion (FFmpeg ရှိတာသေချာပြီမို့ ဒါအလုပ်လုပ်ပါမည်)
         if format_type == "mp3" and not final_file.endswith(".mp3"):
-            print("⚠️ Force converting to MP3...")
             new_path = os.path.join(DOWNLOAD_DIR, f"{base_name}.mp3")
             subprocess.run(["ffmpeg", "-i", final_file, "-vn", "-ab", "192k", new_path, "-y"], check=True)
             final_file = new_path
@@ -127,5 +128,5 @@ def download(url: str, format_type: str = "mp4", format_id: str = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
