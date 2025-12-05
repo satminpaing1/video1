@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-# FFmpeg Auto-Setup (Server ပေါ်ရောက်ရင် အလိုအလျောက် install လုပ်ဖို့)
+# FFmpeg Auto-Setup
 import static_ffmpeg
 static_ffmpeg.add_paths()
 
@@ -26,15 +26,15 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 app.mount("/files", StaticFiles(directory=DOWNLOAD_DIR), name="files")
 
-# Frontend မှာသုံးထားတဲ့ Audio Only Format String
+# Audio Only Format String (Frontend Check)
 SPECIAL_AUDIO_FORMAT = "bestaudio[ext=m4a]/bestaudio"
 
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "Kaneki Downloader (Fixed Categories)"}
+    return {"status": "ok", "message": "Kaneki Downloader (Small MP3)"}
 
 # ------------------------------------------------------------
-# 1. SMART FORMATS (CLEAN IDs)
+# 1. SMART FORMATS
 # ------------------------------------------------------------
 @app.get("/formats")
 def get_formats(url: str):
@@ -64,8 +64,6 @@ def get_formats(url: str):
         
         for res in target_resolutions:
             if res in available_heights:
-                # ဒီနေရာမှာ format_id ကို "v-1080" လိုမျိုး ရိုးရိုးလေးပေးလိုက်မယ်
-                # ဒါမှ Frontend က "audio" လို့ မထင်တော့ဘဲ Video လို့ သိမှာ
                 final_formats.append({
                     "format_id": f"v-{res}", 
                     "ext": "mp4",       
@@ -74,7 +72,6 @@ def get_formats(url: str):
                     "label": f"{res}p"
                 })
 
-        # Fallback if empty
         if not final_formats:
              final_formats.append({
                 "format_id": "v-360",
@@ -91,7 +88,7 @@ def get_formats(url: str):
 
 
 # ------------------------------------------------------------
-# 2. DOWNLOAD HANDLER (MAPPING BACK)
+# 2. DOWNLOAD HANDLER (SIZE REDUCTION ADDED)
 # ------------------------------------------------------------
 @app.get("/download")
 def download(url: str, format_id: str):
@@ -99,45 +96,59 @@ def download(url: str, format_id: str):
         raise HTTPException(status_code=400, detail="Missing parameters")
 
     try:
-        real_format_string = ""
-
-        # Frontend ကပို့လိုက်တဲ့ v-1080, v-720 ကို yt-dlp နားလည်တဲ့ကုဒ်ပြန်ပြောင်းမယ်
-        if format_id.startswith("v-"):
-            # Video Request
-            height = format_id.split("-")[1] # 1080, 720, etc.
-            real_format_string = f"bestvideo[height={height}]+bestaudio/best[height={height}]"
-        
-        elif format_id == SPECIAL_AUDIO_FORMAT or "bestaudio" in format_id:
-            # Audio Request
-            real_format_string = SPECIAL_AUDIO_FORMAT
-        
-        else:
-            # Fallback
-            real_format_string = "best[ext=mp4]"
-
-        # Filename Generation
+        # Generate Filename
         uid = str(uuid.uuid4())[:8]
-        out_tmpl = os.path.join(DOWNLOAD_DIR, f"kaneki_{uid}.%(ext)s")
-
+        
         ydl_opts = {
-            "format": real_format_string,
-            "outtmpl": out_tmpl,
             "quiet": True,
             "noplaylist": True,
             "nocheckcertificate": True,
-            # Audio သက်သက်မဟုတ်ရင် Merge လုပ်မယ်
-            "merge_output_format": "mp4" if "bestvideo" in real_format_string else None,
         }
 
+        # --- VIDEO REQUEST ---
+        if format_id.startswith("v-"):
+            height = format_id.split("-")[1]
+            ydl_opts["format"] = f"bestvideo[height={height}]+bestaudio/best[height={height}]"
+            ydl_opts["merge_output_format"] = "mp4"
+            out_tmpl = os.path.join(DOWNLOAD_DIR, f"kaneki_{uid}.%(ext)s")
+            ydl_opts["outtmpl"] = out_tmpl
+
+        # --- AUDIO REQUEST (COMPRESSED) ---
+        elif format_id == SPECIAL_AUDIO_FORMAT or "bestaudio" in format_id:
+            ydl_opts["format"] = "bestaudio/best" # Download best quality first
+            out_tmpl = os.path.join(DOWNLOAD_DIR, f"kaneki_{uid}.%(ext)s")
+            ydl_opts["outtmpl"] = out_tmpl
+            
+            # Post-processing to convert & compress to MP3 128k
+            ydl_opts["postprocessors"] = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '128',  # 128kbps (Standard Size) - 192kbps for better quality
+            }]
+        
+        else:
+            # Fallback
+            ydl_opts["format"] = "best[ext=mp4]"
+            out_tmpl = os.path.join(DOWNLOAD_DIR, f"kaneki_{uid}.%(ext)s")
+            ydl_opts["outtmpl"] = out_tmpl
+
+
+        # Execute Download
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
             
-            # Extension cleanup (.mkv -> .mp4 if merged)
-            if filename.endswith(".mkv"):
+            # Fix extensions based on post-processing
+            if format_id.startswith("v-") and filename.endswith(".mkv"):
                  pre, _ = os.path.splitext(filename)
                  if os.path.exists(pre + ".mp4"):
                      filename = pre + ".mp4"
+            
+            # Audio conversion check (webm -> mp3)
+            if "bestaudio" in format_id or format_id == SPECIAL_AUDIO_FORMAT:
+                pre, _ = os.path.splitext(filename)
+                if os.path.exists(pre + ".mp3"):
+                    filename = pre + ".mp3"
 
         clean_filename = os.path.basename(filename)
 
