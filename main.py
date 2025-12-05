@@ -23,13 +23,12 @@ app.mount("/files", StaticFiles(directory=DOWNLOAD_DIR), name="files")
 
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "Kaneki Downloader (Playback Fixed)"}
+    return {"status": "ok", "message": "Kaneki Downloader (Audio/Video Fixed)"}
 
 @app.get("/formats")
 def get_formats(url: str):
     if not url: raise HTTPException(status_code=400, detail="URL required")
     
-    # 403 Error မတက်အောင် Android Client လေးတော့ ဟန်ဆောင်ထားလိုက်မယ်
     opts = {
         "quiet": True,
         "skip_download": True,
@@ -43,13 +42,10 @@ def get_formats(url: str):
 
         formats = []
         for f in info.get("formats", []):
-            # Web မှာဖွင့်ဖို့ MP4 ဖြစ်မှရမယ်
             if f.get("ext") == "mp4" and f.get("vcodec") != "none":
                 label = f"{f.get('height')}p"
-                # H.264 (avc1) codec ဆိုရင် Web မှာ ပိုကောင်းကောင်းပွင့်တယ်
                 if "avc1" in (f.get("vcodec") or ""):
                     label += " (Web Safe)"
-                    
                 formats.append({
                     "format_id": f.get("format_id"),
                     "label": label,
@@ -65,31 +61,57 @@ def get_formats(url: str):
 @app.get("/download")
 def download(url: str, format_id: str):
     try:
-        filename = f"{uuid.uuid4()}.mp4"
-        out_path = os.path.join(DOWNLOAD_DIR, filename)
+        unique_id = str(uuid.uuid4())
         
-        opts = {
-            "format": f"{format_id}+bestaudio/best",
-            "outtmpl": out_path,
-            "merge_output_format": "mp4",
-            "quiet": True,
-            "nocheckcertificate": True,
-            "extractor_args": {"youtube": {"player_client": ["android"]}},
-            
-            # --- ဒီအပိုင်းက မင်းပြဿနာကို ဖြေရှင်းမယ့်ကောင် ---
-            # Video Index ကို ရှေ့ဆုံးရွှေ့ပြီး Web မှာ Play လို့ရအောင်လုပ်ခြင်း
-            "postprocessor_args": {
-                "ffmpeg": ["-movflags", "faststart"]
-            }
-            # ---------------------------------------------
-        }
+        # --- အသစ်ပြင်ဆင်ထားသော အပိုင်း ---
+        # Audio လား Video လား ခွဲခြားခြင်း
+        is_audio_request = "audio" in format_id or "bestaudio" in format_id
 
+        if is_audio_request:
+            # === AUDIO MODE (MP3) ===
+            filename = f"{unique_id}.mp3"
+            out_path = os.path.join(DOWNLOAD_DIR, unique_id) # Extension မထည့်ရသေးပါ (FFmpeg က ထည့်ပေးလိမ့်မယ်)
+            
+            opts = {
+                "format": "bestaudio/best",
+                "outtmpl": out_path, # .mp3 ကို FFmpeg က နောက်မှပေါင်းထည့်မယ်
+                "quiet": True,
+                "nocheckcertificate": True,
+                "extractor_args": {"youtube": {"player_client": ["android"]}},
+                # MP3 သို့ ပြောင်းလဲခြင်း Command
+                "postprocessors": [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "192",
+                }],
+            }
+            # yt-dlp က .mp3 ကို auto ဖြည့်သွားမှာမို့ filename ကို ပြန်ညှိပေးရမယ်
+            final_filename = filename 
+
+        else:
+            # === VIDEO MODE (MP4) ===
+            filename = f"{unique_id}.mp4"
+            out_path = os.path.join(DOWNLOAD_DIR, filename)
+            
+            opts = {
+                "format": f"{format_id}+bestaudio/best",
+                "outtmpl": out_path,
+                "merge_output_format": "mp4",
+                "quiet": True,
+                "nocheckcertificate": True,
+                "extractor_args": {"youtube": {"player_client": ["android"]}},
+                # Web Playback အတွက် FastStart
+                "postprocessor_args": {"ffmpeg": ["-movflags", "faststart"]},
+            }
+            final_filename = filename
+
+        # Download စတင်ခြင်း
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
 
         return {
-            "download_url": f"/files/{filename}",
-            "filename": filename
+            "download_url": f"/files/{final_filename}",
+            "filename": final_filename
         }
 
     except Exception as e:
@@ -102,8 +124,10 @@ def get_file(filename: str):
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="File not found")
     
-    # Browser ကို Video ပါလို့ ပြောပြီး ပို့ပေးခြင်း
-    return FileResponse(filepath, media_type="video/mp4", filename=filename)
+    # MIME Type ခွဲခြားခြင်း (Browser သိအောင်)
+    media_type = "audio/mpeg" if filename.endswith(".mp3") else "video/mp4"
+    
+    return FileResponse(filepath, media_type=media_type, filename=filename)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
