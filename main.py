@@ -26,12 +26,12 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 app.mount("/files", StaticFiles(directory=DOWNLOAD_DIR), name="files")
 
-# Audio Only Format String (Frontend Check)
+# Audio Only Format String
 SPECIAL_AUDIO_FORMAT = "bestaudio[ext=m4a]/bestaudio"
 
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "Kaneki Downloader (Small MP3)"}
+    return {"status": "ok", "message": "Kaneki Downloader (Turbo Mode)"}
 
 # ------------------------------------------------------------
 # 1. SMART FORMATS
@@ -88,7 +88,7 @@ def get_formats(url: str):
 
 
 # ------------------------------------------------------------
-# 2. DOWNLOAD HANDLER (SIZE REDUCTION ADDED)
+# 2. DOWNLOAD HANDLER (TURBO SPEED)
 # ------------------------------------------------------------
 @app.get("/download")
 def download(url: str, format_id: str):
@@ -96,13 +96,23 @@ def download(url: str, format_id: str):
         raise HTTPException(status_code=400, detail="Missing parameters")
 
     try:
-        # Generate Filename
         uid = str(uuid.uuid4())[:8]
+        out_tmpl = os.path.join(DOWNLOAD_DIR, f"kaneki_{uid}.%(ext)s")
         
+        # --- SPEED OPTIMIZATION SETTINGS ---
         ydl_opts = {
+            "outtmpl": out_tmpl,
             "quiet": True,
             "noplaylist": True,
             "nocheckcertificate": True,
+            
+            # --- ဒီအပိုင်းက အမြန်နှုန်းကို တင်ပေးမယ့်အရာများ ---
+            "concurrent_fragment_downloads": 5,  # တစ်ပြိုင်နက် ၅ ပိုင်းခွဲဆွဲမယ်
+            "http_chunk_size": 10485760,         # Chunk size 10MB ထားမယ်
+            "retries": 10,                       # လိုင်းကျရင် ၁၀ ခါပြန်စမ်းမယ်
+            "fragment_retries": 10,
+            "buffersize": 1024,
+            # ----------------------------------------------
         }
 
         # --- VIDEO REQUEST ---
@@ -110,27 +120,22 @@ def download(url: str, format_id: str):
             height = format_id.split("-")[1]
             ydl_opts["format"] = f"bestvideo[height={height}]+bestaudio/best[height={height}]"
             ydl_opts["merge_output_format"] = "mp4"
-            out_tmpl = os.path.join(DOWNLOAD_DIR, f"kaneki_{uid}.%(ext)s")
-            ydl_opts["outtmpl"] = out_tmpl
 
-        # --- AUDIO REQUEST (COMPRESSED) ---
+        # --- AUDIO REQUEST ---
         elif format_id == SPECIAL_AUDIO_FORMAT or "bestaudio" in format_id:
-            ydl_opts["format"] = "bestaudio/best" # Download best quality first
-            out_tmpl = os.path.join(DOWNLOAD_DIR, f"kaneki_{uid}.%(ext)s")
-            ydl_opts["outtmpl"] = out_tmpl
-            
-            # Post-processing to convert & compress to MP3 128k
+            ydl_opts["format"] = "bestaudio/best"
             ydl_opts["postprocessors"] = [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
-                'preferredquality': '128',  # 128kbps (Standard Size) - 192kbps for better quality
+                'preferredquality': '128', 
             }]
+            # Audio Convert လုပ်တာမြန်အောင် Quality နည်းနည်းလျှော့ပြီး Speed တင်မယ်
+            ydl_opts["postprocessor_args"] = [
+                '-speed', '0' # Fastest encoding speed
+            ]
         
         else:
-            # Fallback
             ydl_opts["format"] = "best[ext=mp4]"
-            out_tmpl = os.path.join(DOWNLOAD_DIR, f"kaneki_{uid}.%(ext)s")
-            ydl_opts["outtmpl"] = out_tmpl
 
 
         # Execute Download
@@ -138,13 +143,12 @@ def download(url: str, format_id: str):
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
             
-            # Fix extensions based on post-processing
+            # Extension Fix
             if format_id.startswith("v-") and filename.endswith(".mkv"):
                  pre, _ = os.path.splitext(filename)
                  if os.path.exists(pre + ".mp4"):
                      filename = pre + ".mp4"
             
-            # Audio conversion check (webm -> mp3)
             if "bestaudio" in format_id or format_id == SPECIAL_AUDIO_FORMAT:
                 pre, _ = os.path.splitext(filename)
                 if os.path.exists(pre + ".mp3"):
