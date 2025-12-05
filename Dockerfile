@@ -16,6 +16,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# --- FIX IS HERE ---
-# Use Shell form (no brackets) so $PORT variable works correctly
+# --- အဓိက ပြင်ဆင်ထားသည့်နေရာ ---
+# ကွင်းစကွင်းပိတ် [ ] တွေ မထည့်ရပါ။ ဒါမှ $PORT အလုပ်လုပ်ပါမည်။
 CMD uvicorn main:app --host 0.0.0.0 --port $PORT
