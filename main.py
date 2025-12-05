@@ -8,6 +8,7 @@ import uuid
 import uvicorn
 import glob
 import shutil
+import subprocess
 
 app = FastAPI()
 app.add_middleware(
@@ -21,38 +22,35 @@ app.add_middleware(
 DOWNLOAD_DIR = "downloads"
 # Startup: Clean old downloads
 if os.path.exists(DOWNLOAD_DIR):
-    try:
-        shutil.rmtree(DOWNLOAD_DIR)
-    except:
-        pass
+    shutil.rmtree(DOWNLOAD_DIR, ignore_errors=True)
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 app.mount("/files", StaticFiles(directory=DOWNLOAD_DIR), name="files")
 
-# FFmpeg Check
-def check_ffmpeg():
-    if not shutil.which("ffmpeg"):
-        print("WARNING: FFmpeg not found! Merging video/audio might fail.")
-    else:
-        print("FFmpeg found.")
-
-check_ffmpeg()
+# --- FFmpeg Diagnostic ---
+print("--- SYSTEM CHECK ---")
+ffmpeg_path = shutil.which("ffmpeg")
+if ffmpeg_path:
+    print(f"✅ FFmpeg found at: {ffmpeg_path}")
+else:
+    print("❌ CRITICAL: FFmpeg NOT FOUND. Installing via image config is required.")
+print("--------------------")
 
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "Kaneki V2.5 (Stable Android)"}
+    return {"status": "ok", "message": "Kaneki V3.0 (FFmpeg Forced)"}
 
 @app.get("/formats")
 def get_formats(url: str = Query(..., description="Video URL")):
     if not url:
         raise HTTPException(status_code=400, detail="URL required")
 
-    # Use 'android' client which is more stable than iOS currently
     opts = {
         "quiet": True,
         "skip_download": True,
         "nocheckcertificate": True,
-        "extractor_args": {"youtube": {"player_client": ["android", "web"]}}, # Fallback allowed
+        # Use android_creator to potentially see better formats on server IPs
+        "extractor_args": {"youtube": {"player_client": ["android_creator", "android"]}},
     }
 
     try:
@@ -67,15 +65,10 @@ def get_formats(url: str = Query(..., description="Video URL")):
             vcodec = f.get("vcodec")
             height = f.get("height")
             
-            # Filter Video Formats
             if vcodec and vcodec != "none" and height:
-                # Deduplicate by height
                 if height not in seen_qualities and ext in ['mp4', 'webm']:
                     seen_qualities.add(height)
                     label = f"{height}p"
-                    if f.get("fps") and f.get("fps") > 30:
-                        label += f" {int(f.get('fps'))}fps"
-                    
                     formats.append({
                         "format_id": f.get("format_id"),
                         "label": f"🎬 Video {label} ({ext})",
@@ -84,28 +77,14 @@ def get_formats(url: str = Query(..., description="Video URL")):
                         "type": "video"
                     })
 
-        # Sort: High to Low
         formats.sort(key=lambda x: (x["height"] or 0), reverse=True)
-        
-        # Add Audio Option
-        formats.insert(0, {
-            "format_id": "bestaudio",
-            "label": "🎵 MP3 Music (Best Quality)",
-            "height": 0,
-            "ext": "mp3",
-            "type": "audio"
-        })
-
-        if not formats:
-             raise Exception("No compatible formats found")
+        formats.insert(0, {"format_id": "bestaudio", "label": "🎵 MP3 Music (Best Quality)", "height": 0, "ext": "mp3", "type": "audio"})
 
         return {"formats": formats}
 
     except Exception as e:
         print(f"Format Error: {str(e)}")
-        # Return a simplified error to frontend so it doesn't just crash
-        raise HTTPException(status_code=500, detail="Could not analyze video. Try another link.")
-
+        raise HTTPException(status_code=500, detail="Could not analyze link.")
 
 @app.get("/download")
 def download(
@@ -113,27 +92,21 @@ def download(
     format_id: str = Query(None, description="Format ID"),
     format_type: str = Query("mp4", description="mp3 or mp4")
 ):
-    if not url:
-        raise HTTPException(status_code=400, detail="URL required")
-
     base_name = str(uuid.uuid4())
     
-    # Base Options
+    # Configure options
     ydl_opts = {
         "quiet": True,
         "nocheckcertificate": True,
         "outtmpl": os.path.join(DOWNLOAD_DIR, f"{base_name}.%(ext)s"),
-        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+        "extractor_args": {"youtube": {"player_client": ["android_creator", "android"]}},
         "prefer_ffmpeg": True,
-        "socket_timeout": 30,
-        # Improve reliability
         "retries": 3,
-        "fragment_retries": 3,
     }
 
     try:
+        # --- MP3 LOGIC ---
         if format_type == "mp3":
-            # --- MP3 DOWNLOAD MODE ---
             ydl_opts.update({
                 "format": "bestaudio/best",
                 "postprocessors": [{
@@ -142,63 +115,58 @@ def download(
                     "preferredquality": "192",
                 }],
             })
+        
+        # --- VIDEO LOGIC ---
         else:
-            # --- VIDEO DOWNLOAD MODE ---
-            # If user selected a specific quality
+            # Explicitly request merge if format_id is provided
             if format_id and format_id != "bestaudio":
-                # Check if it's a combined format (contains +) or single
-                if "+" in str(format_id):
-                    chosen_format = str(format_id)
-                else:
-                    chosen_format = f"{format_id}+bestaudio/best"
-                
-                ydl_opts.update({
-                    "format": chosen_format,
+                 # If user picked 1080p (e.g., 137), we need to merge with audio
+                 # If ffmpeg is missing, this usually fails or falls back
+                 ydl_opts.update({
+                    "format": f"{format_id}+bestaudio/best" if "+" not in format_id else format_id,
                     "merge_output_format": "mp4",
                 })
             else:
-                # Auto fallback - looser restriction to prevent "format not available"
                 ydl_opts.update({
-                    "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+                    "format": "bestvideo+bestaudio/best",
                     "merge_output_format": "mp4",
                 })
-            
             ydl_opts.update({"postprocessor_args": ["-movflags", "+faststart"]})
 
-        # --- EXECUTE DOWNLOAD ---
+        # --- DOWNLOAD ---
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            try:
-                ydl.download([url])
-            except yt_dlp.utils.DownloadError as de:
-                # Fallback mechanism if specific format fails
-                print(f"First attempt failed: {de}. Retrying with 'best'...")
-                ydl_opts["format"] = "best"
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl_fallback:
-                    ydl_fallback.download([url])
+            ydl.download([url])
 
-        # --- FIND THE FILE ---
-        possible_files = glob.glob(os.path.join(DOWNLOAD_DIR, f"{base_name}.*"))
+        # --- FILE POST-PROCESSING (CRITICAL FIX) ---
+        # Find what file was actually created
+        files = glob.glob(os.path.join(DOWNLOAD_DIR, f"{base_name}.*"))
+        if not files:
+            raise Exception("File not created.")
         
-        if not possible_files:
-            raise HTTPException(status_code=500, detail="Download failed (File creation error)")
-
-        final_file = possible_files[0]
+        final_file = files[0]
+        final_filename = os.path.basename(final_file)
         
-        # Audio conversion safeguard
-        if format_type == "mp3" and not final_file.endswith(".mp3"):
-            new_file = os.path.join(DOWNLOAD_DIR, f"{base_name}.mp3")
-            if shutil.which("ffmpeg"):
-                os.system(f"ffmpeg -i {final_file} -vn -ab 192k {new_file} -y")
-                if os.path.exists(new_file):
-                    final_file = new_file
+        # 1. FIX MP3 EXTENSION
+        if format_type == "mp3":
+            # If yt-dlp produced .m4a or .webm instead of .mp3, convert it manually
+            if not final_file.endswith(".mp3"):
+                new_path = os.path.join(DOWNLOAD_DIR, f"{base_name}.mp3")
+                print(f"Converting {final_file} to {new_path}...")
+                subprocess.run(["ffmpeg", "-i", final_file, "-vn", "-ab", "192k", new_path, "-y"], check=True)
+                final_file = new_path
+                final_filename = f"{base_name}.mp3"
 
-        filename = os.path.basename(final_file)
-        return {"download_url": f"/files/{filename}", "filename": filename}
+        # 2. FIX VIDEO EXTENSION (Ensure .mp4)
+        elif format_type == "mp4" and not final_file.endswith(".mp4"):
+             # If it's .mkv or .webm, just rename it to .mp4 for browser compatibility (simple container swap attempt)
+             # Or better, let backend serve it but tell frontend it's mp4
+             new_path = os.path.join(DOWNLOAD_DIR, f"{base_name}.mp4")
+             shutil.move(final_file, new_path)
+             final_file = new_path
+             final_filename = f"{base_name}.mp4"
+
+        return {"download_url": f"/files/{final_filename}", "filename": final_filename}
 
     except Exception as e:
-        print(f"Download Critical Error: {e}")
+        print(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
