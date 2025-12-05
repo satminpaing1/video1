@@ -23,35 +23,22 @@ app.mount("/files", StaticFiles(directory=DOWNLOAD_DIR), name="files")
 
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "Kaneki Downloader (iOS Fix + MP3)"}
+    return {"status": "ok", "message": "Kaneki Downloader (Restored + MP3 Fix)"}
 
 # ------------------------------------------------------------
-#  CLIENT OPTIONS (Switching to iOS to bypass 403)
+#  FORMATS (ဒီအပိုင်းက မင်းအဆင်ပြေခဲ့တဲ့ Code အတိုင်းပါပဲ)
 # ------------------------------------------------------------
-def get_safe_opts():
-    return {
-        "quiet": True,
-        "no_warnings": True,
-        "nocheckcertificate": True,
-        # Android မရတော့လို့ iOS (iPhone) အဖြစ် ဟန်ဆောင်ပါမယ်
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["ios", "web_embedded"], 
-                "player_skip": ["web", "android"], # Block ခံရတဲ့ client တွေကို ရှောင်မယ်
-            }
-        },
-        # iPhone User Agent ထည့်ပေးခြင်း
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
-        }
-    }
-
 @app.get("/formats")
 def get_formats(url: str):
     if not url: raise HTTPException(status_code=400, detail="URL required")
     
-    opts = get_safe_opts()
-    opts.update({"skip_download": True})
+    # မူလ အဆင်ပြေခဲ့တဲ့ Android Setting
+    opts = {
+        "quiet": True,
+        "skip_download": True,
+        "nocheckcertificate": True,
+        "extractor_args": {"youtube": {"player_client": ["android"]}}, 
+    }
 
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -73,38 +60,44 @@ def get_formats(url: str):
         return {"formats": formats}
 
     except Exception as e:
-        # Error တက်ရင် Console မှာ ပေါ်အောင်
-        print(f"Format Error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# ------------------------------------------------------------
+#  DOWNLOAD (Logic ခွဲထုတ်လိုက်သော နေရာ)
+# ------------------------------------------------------------
 @app.get("/download")
 def download(url: str, format_id: str):
     try:
         unique_id = str(uuid.uuid4())
         
-        # Audio Request လား စစ်ခြင်း
-        is_audio_request = "audio" in format_id or "bestaudio" in format_id
+        # Audio ဟုတ်မဟုတ် စစ်မယ်
+        is_audio = "audio" in format_id or "bestaudio" in format_id
 
-        opts = get_safe_opts() # iOS options ကို ယူမယ်
+        # Common Options (အခြေခံ setting)
+        opts = {
+            "quiet": True,
+            "nocheckcertificate": True,
+            "extractor_args": {"youtube": {"player_client": ["android"]}},
+        }
 
-        if is_audio_request:
-            # === AUDIO MODE (MP3) ===
+        if is_audio:
+            # === MP3 အတွက် သီးသန့် (File Size သေးသွားအောင်) ===
             filename = f"{unique_id}.mp3"
-            out_path = os.path.join(DOWNLOAD_DIR, unique_id)
+            # Extension မပါတဲ့ Path ကိုပေးရမယ် (FFmpeg က .mp3 ကို သူ့ဘာသာထည့်မယ်)
+            out_path_base = os.path.join(DOWNLOAD_DIR, unique_id)
             
             opts.update({
                 "format": "bestaudio/best",
-                "outtmpl": out_path,
+                "outtmpl": out_path_base, 
                 "postprocessors": [{
                     "key": "FFmpegExtractAudio",
                     "preferredcodec": "mp3",
-                    "preferredquality": "192",
+                    "preferredquality": "128", # 128k quality (Standard)
                 }],
             })
-            final_filename = filename 
-
+            
         else:
-            # === VIDEO MODE (MP4) ===
+            # === Video အတွက် သီးသန့် (Web Playback ရအောင်) ===
             filename = f"{unique_id}.mp4"
             out_path = os.path.join(DOWNLOAD_DIR, filename)
             
@@ -112,23 +105,21 @@ def download(url: str, format_id: str):
                 "format": f"{format_id}+bestaudio/best",
                 "outtmpl": out_path,
                 "merge_output_format": "mp4",
-                # Browser Playback Fix
+                # Web မှာ Play လို့ရတဲ့ FastStart ကုဒ် (ဒါက အရင်က အလုပ်လုပ်ခဲ့တဲ့ကောင်)
                 "postprocessor_args": {"ffmpeg": ["-movflags", "faststart"]},
             })
-            final_filename = filename
 
-        print(f"Downloading: {url} | Mode: {'Audio' if is_audio_request else 'Video'}")
-        
+        # Download စဆွဲမယ်
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
 
         return {
-            "download_url": f"/files/{final_filename}",
-            "filename": final_filename
+            "download_url": f"/files/{filename}",
+            "filename": filename
         }
 
     except Exception as e:
-        print(f"Download Error: {str(e)}")
+        print(f"Download Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/file/{filename}")
@@ -137,6 +128,7 @@ def get_file(filename: str):
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="File not found")
     
+    # Browser သိအောင် Type ခွဲပေးမယ်
     media_type = "audio/mpeg" if filename.endswith(".mp3") else "video/mp4"
     return FileResponse(filepath, media_type=media_type, filename=filename)
 
